@@ -1,0 +1,13 @@
+metric,axis,bm100,bm500,bm1000,bm2000,bm5000
+hit_rate_pct,BM25_K→,,,,,
+hit_rate_pct,jina-v3 K=100,84.4,87.6,89.4,92.0,92.8
+hit_rate_pct,jina-v3 K=500,86.6,88.8,90.2,92.2,92.8
+hit_rate_pct,jina-v3 K=1000,87.8,89.4,90.6,92.2,92.8
+hit_rate_pct,jina-v3 K=2000,88.6,90.0,91.0,92.2,92.8
+hit_rate_pct,jina-v3 K=5000,90.4,91.2,92.0,92.8,93.2
+mean_union_size,BM25_K→,,,,,
+mean_union_size,jina-v3 K=100,187.3,573.8,1066.3,2057.8,5045.7
+mean_union_size,jina-v3 K=500,573.7,928.5,1397.3,2359.1,5298.3
+mean_union_size,jina-v3 K=1000,1066.0,1397.4,1844.8,2775.8,5661.0
+mean_union_size,jina-v3 K=2000,2057.4,2358.8,2776.0,3659.4,6451.0
+mean_union_size,jina-v3 K=5000,5045.4,5298.3,5661.7,6450.6,9028.6

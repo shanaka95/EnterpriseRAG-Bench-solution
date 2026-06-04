@@ -1,0 +1,47 @@
+# ============================================================
+# Hierarchical Soft-Clustering RAG Pipeline - Backend Dependencies
+# ============================================================
+# Core Framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# Database
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+alembic==1.14.1
+
+# Task Queue
+celery[redis]==5.4.0
+redis==5.2.1
+
+# ML & GPU
+sentence-transformers==3.3.1
+scikit-learn==1.6.1
+numpy==1.26.4
+scipy==1.14.1
+torch==2.5.1
+faiss-cpu==1.14.2
+
+# RAPIDS (GPU-accelerated ML) - install separately via pip from RAPIDS nightly
+# cuml, cuml, cudf are installed via RAPIDS conda/pip channel
+# We include fallback CPU paths
+
+# Cross-Encoder
+cross-encoder==1.0.0
+
+# ColBERT reranker (Jina-ColBERT-v2 via PyLate) — query-time only, CPU.
+# Loaded lazily only when COLBERT_RERANK_ENABLED=true at runtime.
+pylate==1.2.0
+einops==0.8.0
+lancedb==0.33.0
+pylance==7.0.0
+
+# Utilities
+python-multipart==0.0.20
+httpx==0.28.1
+sse-starlette==2.2.1
+websockets==14.1
+python-dateutil==2.9.0
+uuid7==0.1.0
