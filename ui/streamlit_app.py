@@ -452,7 +452,12 @@ def render_results(final: dict, q: dict):
     # ---- final answer ----
     st.markdown("---")
     st.markdown("## 🎯 Final answer")
-    ans = final.get("final_answer") or "(no answer parsed)"
+    # final_answer is the `response` field of the submit_answer tool call.
+    # The tool guarantees it's a clean string (validated JSON via Pydantic),
+    # never polluted with thinking traces.
+    ans = final.get("final_answer") or "(no answer submitted)"
+    if final.get("finished_via_tool"):
+        st.caption("✅ Extracted from `submit_answer` tool call (structured JSON)")
     if hit:
         st.markdown(
             f'<div class="final-card hit">'

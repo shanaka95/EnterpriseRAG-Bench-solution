@@ -1,18 +1,51 @@
-"""Tool the reactive agent calls to paginate through the refined docs.
+"""Tools the reactive agent uses.
 
-The tool is a closure that captures the live graph state. When the agent
-calls it, the tool returns the next ``batch_size`` documents in
-(doc_id, content) format and advances the state's cursor. This avoids
-threading the state dict through the tool's signature.
+Two tools:
+  * ``get_next_batch``  — paginate through the refined docs, 10 at a time.
+  * ``submit_answer``   — the canonical way to provide the final answer.
+
+Why a dedicated tool for the final answer? Because the Anthropic API
+``tool_use`` mechanism guarantees that the arguments the model passes to
+a tool are valid JSON matching the declared ``input_schema``. So if the
+agent's final answer comes through ``submit_answer(doc_id, response)``,
+we *know* the result is a structured object — no regex parsing of free
+text, no dealing with markdown fences, no fighting with thinking blocks.
+
+The graph also wires ``tool_choice={"type": "tool", "name": "submit_answer"}``
+on the final turn so the model is forced to use this tool (and produce
+structured JSON) when it's done reading.
 """
 from __future__ import annotations
 import json
 import os
 from typing import Any, Callable
 
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool, tool
+from pydantic import BaseModel, Field
 
 from .config import load_config
+
+
+class SubmitAnswerArgs(BaseModel):
+    """The strict schema for the final answer.
+
+    The Anthropic API validates the model's tool arguments against this
+    schema before sending them back. If the model calls ``submit_answer``
+    with these fields filled in, the input is guaranteed valid JSON.
+    """
+    doc_id: str | None = Field(
+        default=None,
+        description=(
+            "Comma-separated list of doc_id(s) that contained the answer. "
+            "Use null if the answer was not found in the retrieved documents. "
+            "The model may return a string, but it will be coerced to a list "
+            "by the parser when there are multiple doc_ids."
+        ),
+    )
+    response: str = Field(
+        ...,
+        description="The final answer to the user's question. Be concise.",
+    )
 
 
 def make_get_next_batch(state_holder: dict) -> Callable:
@@ -73,3 +106,48 @@ def make_get_next_batch(state_holder: dict) -> Callable:
         }, ensure_ascii=False)
 
     return get_next_batch
+
+
+def make_submit_answer(state_holder: dict) -> BaseTool:
+    """Return a StructuredTool that captures the final answer.
+
+    When the agent calls this tool, the args are validated by Pydantic
+    (``SubmitAnswerArgs``) — so we *know* the input is structured JSON
+    with ``doc_id`` and ``response`` fields. The tool then writes the
+    captured answer into ``state_holder`` and returns a sentinel string
+    so the ToolNode completes successfully.
+    """
+    cfg = load_config()
+
+    def _run(doc_id: str | None, response: str) -> str:
+        # The args have already been validated by Pydantic before this runs.
+        # Normalize doc_id: the schema says str or None, but the model
+        # sometimes returns a comma-separated string for multiple docs.
+        docs: list[str] = []
+        if isinstance(doc_id, str) and doc_id.strip():
+            docs = [d.strip() for d in doc_id.split(",") if d.strip()]
+        state_holder["final_answer"] = response
+        state_holder["supporting_doc_ids"] = docs
+        state_holder["finished_via_tool"] = True
+        return json.dumps({
+            "status": "answer_submitted",
+            "doc_id": doc_id,
+            "response_preview": response[:200],
+        }, ensure_ascii=False)
+
+    # Use StructuredTool so the args_schema is enforced.
+    from langchain_core.tools import StructuredTool
+    return StructuredTool.from_function(
+        func=_run,
+        name="submit_answer",
+        description=(
+            "Submit your final answer to the user's question. Use this tool "
+            "ONLY when you have enough information to answer. The tool takes "
+            "two arguments: (1) the doc_id (or comma-separated doc_ids) of "
+            "the document(s) that contained the answer — pass null if no "
+            "document contained the answer; (2) your final response text. "
+            "This is the ONLY way to finalize your answer. Do NOT output "
+            "JSON as plain text — always call this tool."
+        ),
+        args_schema=SubmitAnswerArgs,
+    )

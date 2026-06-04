@@ -14,8 +14,9 @@ supporting evidence.
 """
 from .state import AgentState
 from .retrieval import bm25_retrieve, jina_dense_retrieve, make_rrf_fuse
-from .tools import make_get_next_batch
+from .tools import make_get_next_batch, make_submit_answer
 from .graph import build_graph, run_agent
 
 __all__ = ["AgentState", "bm25_retrieve", "jina_dense_retrieve", "make_rrf_fuse",
-           "make_get_next_batch", "build_graph", "run_agent"]
+           "make_get_next_batch", "make_submit_answer",
+           "build_graph", "run_agent"]
