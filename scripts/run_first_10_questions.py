@@ -92,8 +92,6 @@ def main():
             final = run_agent(
                 qtext,
                 question_id=qid,
-                expected_doc_ids=q.get("expected_doc_ids", []),
-                gold_answer=q.get("gold_answer"),
             )
         except Exception as e:
             print(f"  ERROR: {e}", flush=True)

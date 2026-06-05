@@ -297,17 +297,21 @@ def build_graph() -> tuple[Any, dict]:
 
 # ---------- convenience runner ----------
 
-def run_agent(question: str, question_id: str | None = None,
-              expected_doc_ids: list[str] | None = None,
-              gold_answer: str | None = None) -> dict:
+def run_agent(question: str, question_id: str | None = None) -> dict:
     """Run the full agent on a single question. Returns a flat dict with
-    the final state (and the messages for UI rendering)."""
+    the final state (and the messages for UI rendering).
+
+    Note: ``expected_doc_ids`` and ``gold_answer`` from the benchmark
+    questions are NOT passed into the graph. They are evaluated
+    post-hoc by the caller (e.g. ``run_first_10_questions.py`` or
+    the Streamlit UI) using the returned ``final_answer`` and
+    ``supporting_doc_ids``. This keeps the agent's prompt free of
+    any benchmark gold data, so its answers are honest.
+    """
     graph, state_holder = build_graph()
     init: AgentState = {
         "question": question,
         "question_id": question_id,
-        "expected_doc_ids": expected_doc_ids or [],
-        "gold_answer": gold_answer,
         "messages": [],
         "node_trace": [],
         "current_idx": 0,

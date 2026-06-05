@@ -24,9 +24,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 API_BASE = os.environ.get("API_BASE", "http://localhost:8080")
-LLM_API_URL = "https://api.minimax.io/anthropic/v1/messages"
-LLM_API_KEY = "sk-cp-J_Yx7QwGKs6FkutTX8IqQJBcqBqs2YhGQimiKPNEgewv80pT1igulMjB79xPw-l7eUBat2gQNPYfnK8C72DHaodAuDdVQc-lr7pC0MKJ-Z0nrxKY8F5V_eo"
-LLM_MODEL = "MiniMax-M2.7"
+LLM_API_URL = (os.environ.get("MINIMAX_BASE_URL",
+                              "https://api.minimax.io/anthropic")
+               + "/v1/messages")
+LLM_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
+LLM_MODEL = os.environ.get("MINIMAX_MODEL", "MiniMax-M2.7")
+
+if not LLM_API_KEY:
+    raise SystemExit(
+        "MINIMAX_API_KEY env var is required. Export it or use scripts/run_ui.sh."
+    )
 
 # ============================================================
 # Step 1: Generate Q&A pairs from documents

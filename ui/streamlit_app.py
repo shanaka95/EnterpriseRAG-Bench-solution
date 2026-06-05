@@ -6,6 +6,7 @@ Run with::
     ./scripts/run_ui.sh
 """
 from __future__ import annotations
+import html
 import json
 import os
 import sys
@@ -310,8 +311,6 @@ def main():
                 final = run_agent(
                     q["question"],
                     question_id=q["question_id"],
-                    expected_doc_ids=q.get("expected_doc_ids", []),
-                    gold_answer=q.get("gold_answer"),
                 )
                 final["_wallclock_s"] = time.time() - t0
                 st.session_state.last_run = final
@@ -398,12 +397,20 @@ def render_results(final: dict, q: dict):
             tcs = m.tool_calls or []
             if tcs:
                 tool_names = ", ".join(tc.get("name", "?") for tc in tcs)
-                args_preview = "; ".join(
-                    f'{tc.get("name")}({json.dumps(tc.get("args", {}))[:120]})'
+                # Show the full args the agent passed to the tool — no
+                # truncation, no matter how long the response is. For
+                # `submit_answer` the `response` field is the final answer
+                # the user wants to see in full; for `get_next_batch` the
+                # args are tiny, so there's no cost to showing them whole.
+                args_preview = "<br>".join(
+                    f'<code>{tc.get("name")}('
+                    f'{html.escape(json.dumps(tc.get("args", {}), ensure_ascii=False))}'
+                    f')</code>'
                     for tc in tcs)
                 trace_container.markdown(
-                    f'<div class="step"><span class="step-label">AGENT → tool</span>: '
-                    f'{tool_names}<br><small>{args_preview}</small></div>',
+                    f'<div class="step">'
+                    f'<span class="step-label">AGENT → tool</span>: {tool_names}'
+                    f'<br>{args_preview}</div>',
                     unsafe_allow_html=True)
             else:
                 text = (str(m.content) or "")[:600]

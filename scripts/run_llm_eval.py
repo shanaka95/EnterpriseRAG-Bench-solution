@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
-"""Run LLM-as-judge evaluation on existing RAG results."""
+"""Run LLM-as-judge evaluation on existing RAG results.
+
+Reads ``MINIMAX_API_KEY`` and ``MINIMAX_BASE_URL`` from the environment
+(set via .env, scripts/run_ui.sh, or export). The input CSV defaults to
+``data/agent_answers_first10.csv``; override with ``RAG_RESULTS_CSV``.
+"""
 import csv
 import json
+import os
 import requests
 import numpy as np
 
-LLM_API_URL = "https://api.minimax.io/anthropic/v1/messages"
-LLM_API_KEY = "sk-cp-J_Yx7QwGKs6FkutTX8IqQJBcqBqs2YhGQimiKPNEgewv80pT1igulMjB79xPw-l7eUBat2gQNPYfnK8C72DHaodAuDdVQc-lr7pC0MKJ-Z0nrxKY8F5V_eo"
-LLM_MODEL = "MiniMax-M2.7"
+LLM_API_URL = (os.environ.get("MINIMAX_BASE_URL",
+                              "https://api.minimax.io/anthropic")
+               + "/v1/messages")
+LLM_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
+LLM_MODEL = os.environ.get("MINIMAX_MODEL", "MiniMax-M2.7")
+RESULTS_CSV = os.environ.get("RAG_RESULTS_CSV",
+                             "/data/projects/rag/data/agent_answers_first10.csv")
+
+if not LLM_API_KEY:
+    raise SystemExit(
+        "MINIMAX_API_KEY env var is required. Export it or use scripts/run_ui.sh."
+    )
 
 def extract_text(response_json):
     """Extract text content from MiniMax response."""
@@ -56,7 +71,7 @@ Rate 0.0-1.0 on each dimension. RESPOND WITH ONLY THIS JSON:
 
 # Read results
 results = []
-with open("/app/rag_evaluation_results.csv", "r", encoding="utf-8") as f:
+with open(RESULTS_CSV, "r", encoding="utf-8") as f:
     reader = csv.DictReader(f)
     results = list(reader)
 

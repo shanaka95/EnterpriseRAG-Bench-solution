@@ -19,8 +19,6 @@ class AgentState(TypedDict, total=False):
     # --- input ---
     question: str
     question_id: str | None
-    expected_doc_ids: list[str] | None
-    gold_answer: str | None
 
     # --- retrieval phase ---
     jv_ranked: list[str]
