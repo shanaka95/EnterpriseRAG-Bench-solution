@@ -12,7 +12,7 @@ Graph layout (StateGraph):
                   │                 └──────────┘
                   v
             ┌──────────┐
-            │  tools   │  get_next_batch → 10 docs
+            │  tools   │  get_next_batch → 5 docs
             │  node    │  submit_answer  → captures final JSON
             └──────────┘
                   │
@@ -39,11 +39,12 @@ the model to use the structured tool.
 from __future__ import annotations
 import json
 import time
-from typing import Any, Literal
+from typing import Any, Literal, Optional  # noqa: UP035
 
 from langchain_core.messages import (
     SystemMessage, HumanMessage, AIMessage, ToolMessage,
 )
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -97,7 +98,7 @@ SYSTEM_PROMPT = """You are a precise, fully-grounded question-answering assistan
 given a user question and access to a corpus of documents via TWO tools:
 
   1. `get_next_batch(batch_size)` — fetch the next batch of documents \
-(default 10) in relevance order from a previous retrieval stage \
+(default 5) in relevance order from a previous retrieval stage \
 (BM25 + jina-v3 + RRF fusion).
   2. `submit_answer(doc_id, response)` — submit your FINAL answer. \
 This is the ONLY way to finish the task.
@@ -139,15 +140,21 @@ NEVER output plain text or JSON as your final answer. ALWAYS use the `submit_ans
 
 # ---------- agent node ----------
 
-def make_agent_node(state_holder: dict):
-    """Create the LLM-calling node. Captures state_holder in closure."""
-    llm = get_llm()
+def make_agent_node(state_holder: dict, llm=None):
+    """Create the LLM-calling node. Captures state_holder in closure.
+
+    ``llm`` is a pre-built LangChain chat model (ChatAnthropic or
+    ChatOpenAI). If None, we build one from the env via :func:`get_llm`.
+    The graph itself is protocol-agnostic.
+    """
+    if llm is None:
+        llm = get_llm()
     get_batch_tool: BaseTool = make_get_next_batch(state_holder)
     submit_tool: BaseTool = make_submit_answer(state_holder)
     # Both tools bound on the LLM. The model picks which to call.
     llm_with_tools = llm.bind_tools([get_batch_tool, submit_tool])
 
-    def agent_node(state: AgentState) -> dict:
+    def agent_node(state: AgentState, config: Optional[RunnableConfig] = None) -> dict:  # noqa: UP045
         t0 = time.time()
         messages = state.get("messages", []) or []
         new_messages: list = []
@@ -164,7 +171,15 @@ def make_agent_node(state_holder: dict):
             ]
             messages = list(messages) + new_messages
 
-        resp = llm_with_tools.invoke(messages)
+        # Forward the run config (which carries Langfuse callbacks +
+        # tags + metadata) to the LLM call. Without this, the LLM's
+        # `on_chat_model_start` / `on_llm_end` events never reach the
+        # Langfuse handler — the handler is attached at the graph
+        # level via `graph.invoke(state, config={...})`, but the LLM
+        # here is invoked directly and wouldn't see the config unless
+        # we forward it. LangGraph populates the `config` kwarg for
+        # node functions automatically.
+        resp = llm_with_tools.invoke(messages, config=config)
         elapsed = time.time() - t0
         # Normalize: strip thinking, keep tool_calls intact.
         try:
@@ -260,15 +275,24 @@ def finalize(state: AgentState) -> dict:
 
 # ---------- graph builder ----------
 
-def build_graph() -> tuple[Any, dict]:
-    """Build the state graph and return (compiled_graph, state_holder).
+def build_graph(llm=None) -> tuple[Any, dict, Any]:
+    """Build the state graph and return ``(compiled_graph, state_holder, llm)``.
 
     The state_holder is shared across the rrf_fuse node, the agent's
     submit_answer tool, and the get_next_batch tool, so all writes
-    propagate consistently.
+    propagate consistently. The LLM is returned as a convenience so
+    callers (notably :func:`run_agent`) can introspect it for
+    tracing metadata without constructing a second instance.
+
+    ``llm`` is an optional pre-built LangChain chat model. If None,
+    the agent node builds one from the env via :func:`get_llm`. Callers
+    (e.g. the Streamlit UI) pass a custom ``llm`` to use user-entered
+    credentials instead of the env-var defaults.
     """
+    if llm is None:
+        llm = get_llm()
     state_holder: dict = {}
-    agent_node = make_agent_node(state_holder)
+    agent_node = make_agent_node(state_holder, llm=llm)
     rrf_node = make_rrf_fuse(state_holder)
     get_batch_tool = make_get_next_batch(state_holder)
     submit_tool = make_submit_answer(state_holder)
@@ -292,14 +316,44 @@ def build_graph() -> tuple[Any, dict]:
     g.add_edge("tools", "agent")
     g.add_edge("finalize", END)
 
-    return g.compile(), state_holder
+    return g.compile(), state_holder, llm
 
 
 # ---------- convenience runner ----------
 
-def run_agent(question: str, question_id: str | None = None) -> dict:
+def run_agent(question: str, question_id: str | None = None,
+              llm=None, trace: bool = True,
+              session_id: str | None = None) -> dict:
     """Run the full agent on a single question. Returns a flat dict with
     the final state (and the messages for UI rendering).
+
+    Pass ``llm`` to use a pre-built LangChain chat model (e.g. one
+    constructed from user-entered UI credentials). If None, the graph
+    builds one from the env via :func:`get_llm`. The graph itself is
+    protocol-agnostic — works for ChatAnthropic, ChatOpenAI, or any
+    compatible class.
+
+    Tracing
+    -------
+    Set ``trace=False`` to skip Langfuse tracing even if the env vars
+    are configured. When ``trace=True`` (default), if Langfuse is
+    configured, every LangChain run inside the graph is captured as
+    a single trace with:
+
+        - ``name = "rag-<question_id>"`` (descriptive, not the default
+          auto-generated name)
+        - ``session_id = <session_id>`` — pass the same id for every
+          question in a batch run, and all 10 traces show up under one
+          "Session" in the Langfuse UI for conversation replay
+        - ``tags = ["rag-agent", "model:<name>", "protocol:<openai|anthropic>"]``
+        - ``metadata.model`` and ``metadata.protocol`` so dashboards
+          can filter by deployment
+        - ``metadata.question_id`` so you can find the trace for a
+          specific benchmark question
+
+    The model + protocol are auto-detected from the LLM class via
+    :func:`agent.llm.llm_info`, so they reflect the actual LLM that
+    was used (not just the env defaults).
 
     Note: ``expected_doc_ids`` and ``gold_answer`` from the benchmark
     questions are NOT passed into the graph. They are evaluated
@@ -308,7 +362,7 @@ def run_agent(question: str, question_id: str | None = None) -> dict:
     ``supporting_doc_ids``. This keeps the agent's prompt free of
     any benchmark gold data, so its answers are honest.
     """
-    graph, state_holder = build_graph()
+    graph, state_holder, llm = build_graph(llm=llm)
     init: AgentState = {
         "question": question,
         "question_id": question_id,
@@ -318,7 +372,26 @@ def run_agent(question: str, question_id: str | None = None) -> dict:
         "finished": False,
         "seeded": False,
     }
-    final = graph.invoke(init, {"recursion_limit": 200})
+    invoke_config: dict = {"recursion_limit": 200}
+    if trace:
+        # Detect the actual model + protocol from the LLM the graph
+        # is using (not just the env defaults — the UI may have passed
+        # a custom one). Then build a RunnableConfig with the
+        # langfuse_* metadata keys the handler forwards into
+        # propagate_attributes() at trace start.
+        from .tracing import build_trace_config
+        from .llm import llm_info
+        protocol, model_name = llm_info(llm)
+        cfg = build_trace_config(
+            question_id=question_id,
+            session_id=session_id,
+            model=model_name,
+            protocol=protocol,
+        )
+        # build_trace_config returns a config with at least
+        # recursion_limit; if tracing is off it just has that key.
+        invoke_config.update(cfg)
+    final = graph.invoke(init, invoke_config)
     # Merge state_holder values back. The agent_node writes
     # final_answer/supporting_doc_ids into state_holder directly when
     # the model calls submit_answer; the graph's view of the state

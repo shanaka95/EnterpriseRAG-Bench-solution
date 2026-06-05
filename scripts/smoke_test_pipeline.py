@@ -21,6 +21,8 @@ import json
 import os
 import sys
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Ensure the venv-loaded `agent` package is importable
@@ -34,6 +36,7 @@ if not os.environ.get("MINIMAX_API_KEY"):
     sys.exit(2)
 
 from agent import run_agent  # noqa: E402
+from agent.tracing import shutdown as lf_shutdown  # noqa: E402
 
 QUESTIONS = "/data/projects/rag/data/questions.jsonl"
 # qst_0002 is short, has a single-word gold answer ("stream.timebox_finalized")
@@ -68,8 +71,23 @@ def main() -> int:
     print(f"Gold words:  {sorted(gold_words)}")
     print()
 
+    # Per-run Langfuse session id so the smoke test trace is findable
+    # in the Sessions view. Format: smoke-YYYYMMDD-HHMMSS-<short uuid>.
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    session_id = f"smoke-{stamp}-{uuid.uuid4().hex[:8]}"
+    print(f"Langfuse session_id: {session_id}", flush=True)
+    try:
+        return _run_checks(q, gold_answer, gold_docs, gold_words, session_id)
+    finally:
+        # Always flush Langfuse — even on a failed assertion — so the
+        # trace lands in the UI either way.
+        lf_shutdown()
+
+
+def _run_checks(q, gold_answer, gold_docs, gold_words, session_id) -> int:
     t0 = time.time()
-    final = run_agent(q["question"], question_id=QID)
+    final = run_agent(q["question"], question_id=q["question_id"],
+                      session_id=session_id)
     elapsed = time.time() - t0
     print(f"\nfinished in {elapsed:.1f}s")
     print(f"final_answer:        {final.get('final_answer')!r}")
@@ -175,6 +193,8 @@ def main() -> int:
     print("=" * 60)
     print("✅ SMOKE TEST PASSED")
     print("=" * 60)
+    # Force-flush Langfuse before exit so the trace lands in the UI
+    lf_shutdown()
     return 0
 
 

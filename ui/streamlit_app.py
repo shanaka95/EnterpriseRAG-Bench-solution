@@ -11,6 +11,8 @@ import json
 import os
 import sys
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -25,6 +27,7 @@ os.environ.setdefault("MINIMAX_BASE_URL", "https://api.minimax.io/anthropic")
 os.environ.setdefault("MINIMAX_MODEL", "MiniMax-M2.7")
 
 from agent import run_agent  # noqa: E402
+from agent.llm import get_llm  # noqa: E402
 
 QUESTIONS_PATH = "/data/projects/rag/data/questions.jsonl"
 CORPUS_DIR = "/data/projects/rag/data/all_documents"
@@ -88,6 +91,50 @@ def init_state():
     ss.setdefault("selected_qid", None)
     ss.setdefault("last_run", None)
     ss.setdefault("running", False)
+    # LLM connection (UI overrides env vars when any field is set)
+    ss.setdefault("llm_api_key", "")
+    ss.setdefault("llm_base_url", "")
+    ss.setdefault("llm_model", "")
+    ss.setdefault("llm_protocol", "openai")
+    ss.setdefault("tracing_enabled", True)
+    # Per-UI-session Langfuse session id. Generated once per
+    # Streamlit session (browser tab) so all "Run" clicks within the
+    # same tab share one Langfuse session and can be replayed as a
+    # single conversation. Format: ui-YYYYMMDD-HHMMSS-<short uuid>.
+    if "langfuse_session_id" not in ss:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        ss.langfuse_session_id = f"ui-{stamp}-{uuid.uuid4().hex[:8]}"
+
+
+def build_llm_from_ui() -> tuple[object, str, str, str]:
+    """Build the LLM from sidebar inputs (UI values override env vars).
+
+    Caches the result on ``st.session_state.llm_cache`` keyed by the
+    current (key, url, model, protocol) tuple. Reruns that don't touch
+    the sidebar inputs return the cached LLM without re-instantiating.
+
+    Returns (llm, source_label, protocol, model) where ``source_label``
+    is "from UI" or "from env" — used in the status line.
+    """
+    ss = st.session_state
+    ui_key = ss.llm_api_key.strip()
+    ui_url = ss.llm_base_url.strip()
+    ui_model = ss.llm_model.strip()
+    use_ui = bool(ui_key or ui_url or ui_model)
+    source = "from UI" if use_ui else "from env"
+    cache_key = (ui_key, ui_url, ui_model, ss.llm_protocol)
+    cached = ss.get("_llm_cache")
+    if cached and cached[0] == cache_key:
+        llm = cached[1]
+    else:
+        llm = get_llm(
+            protocol=ss.llm_protocol,
+            api_key=ui_key or None,
+            base_url=ui_url or None,
+            model=ui_model or None,
+        )
+        ss._llm_cache = (cache_key, llm)
+    return llm, source, ss.llm_protocol, (ui_model or os.environ.get("MINIMAX_MODEL", "?"))
 
 
 # ---------- UI ----------
@@ -98,7 +145,7 @@ def main():
         page_icon="🔎",
         layout="wide",
         initial_sidebar_state="expanded",
-        menu_items={"about": "Reactive RAG agent — BM25 + jina-v3 + RRF + LLM (batches of 10)"},
+        menu_items={"about": "Reactive RAG agent — BM25 + jina-v3 + RRF + LLM (batches of 5)"},
     )
     init_state()
 
@@ -214,10 +261,52 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    # ---- sidebar: question picker ----
+    # ---- sidebar: LLM connection + question picker ----
     with st.sidebar:
         st.markdown("## 🔎 RAG Agent Tester")
         st.caption("500 enterprise questions")
+        st.markdown("---")
+
+        # ---- LLM connection (overrides env vars if any field is set) ----
+        st.markdown("### 🤖 LLM connection")
+        st.text_input(
+            "API key", key="llm_api_key", type="password",
+            placeholder=("(env: " + (os.environ.get("MINIMAX_API_KEY", "")[:6] + "…") if os.environ.get("MINIMAX_API_KEY") else "sk-…"),
+            help="Leave empty to use MINIMAX_API_KEY env var.",
+        )
+        st.text_input(
+            "Base URL", key="llm_base_url",
+            placeholder=os.environ.get("MINIMAX_BASE_URL", "http://167.233.22.91:19950/"),
+            help="Leave empty to use MINIMAX_BASE_URL env var. The OpenAI client strips a trailing /v1 automatically.",
+        )
+        st.text_input(
+            "Model", key="llm_model",
+            placeholder="openai 5.4",
+            help="Leave empty to use MINIMAX_MODEL env var.",
+        )
+        st.radio(
+            "Protocol", options=("openai", "anthropic"),
+            key="llm_protocol", horizontal=True,
+            help="OpenAI-compatible: most providers. Anthropic-compatible: claude-* models.",
+        )
+        # Build the LLM once per rerun to validate the inputs (raises on
+        # bad protocol, etc.) and show the resolved status line.
+        try:
+            _, llm_source, llm_proto, llm_model_name = build_llm_from_ui()
+            env_url = os.environ.get("MINIMAX_BASE_URL", "https://api.minimax.io/anthropic")
+            if llm_source == "from UI":
+                st.success(
+                    f"✅ Using UI values: `{llm_proto}` / `{llm_model_name}` @ "
+                    f"`{st.session_state.llm_base_url or env_url}`"
+                )
+            else:
+                st.caption(
+                    f"From env: `{llm_proto}` / `{llm_model_name}` @ `{env_url}`"
+                )
+        except Exception as e:
+            st.error(f"LLM config error: {e}")
+            st.stop()
+
         st.markdown("---")
 
         questions = load_questions()
@@ -251,9 +340,29 @@ def main():
 1. BM25@2k (sparse)
 2. jina-v3@2k (dense)
 3. RRF (k0=60) → top-100
-4. LLM agent reads in batches of 10
+4. LLM agent reads in batches of 5
         """)
         st.caption("First run ~4 min (BM25 build); subsequent ~30-90s")
+
+        st.markdown("---")
+        st.markdown("### 🔭 Tracing (Langfuse)")
+        st.checkbox(
+            "Send runs to Langfuse",
+            key="tracing_enabled",
+            help="When on, every run is traced to the Langfuse project "
+                 "configured via LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / "
+                 "LANGFUSE_BASE_URL. Disable for local-only runs.",
+        )
+        if st.session_state.tracing_enabled:
+            lf_url = os.environ.get("LANGFUSE_BASE_URL", "")
+            lf_pk = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+            if lf_pk and lf_url:
+                st.caption(f"✅ Tracing → `{lf_url}`")
+                # Show the session id so the user can find this UI
+                # session in the Langfuse Sessions view.
+                st.caption(f"🆔 Session: `{st.session_state.langfuse_session_id}`")
+            else:
+                st.caption("⚠️ Langfuse env vars not set — tracing will no-op")
 
     # ---- main: question card ----
     questions = load_questions()
@@ -308,11 +417,25 @@ def main():
         with st.spinner("⏳ Running BM25 + jina-v3 + RRF + agent…"):
             t0 = time.time()
             try:
+                llm, _, _, _ = build_llm_from_ui()
                 final = run_agent(
                     q["question"],
                     question_id=q["question_id"],
+                    llm=llm,
+                    trace=st.session_state.tracing_enabled,
+                    session_id=st.session_state.langfuse_session_id,
                 )
+                # Flush Langfuse events so the trace appears in the
+                # dashboard before the spinner goes away
+                if st.session_state.tracing_enabled:
+                    try:
+                        from agent.tracing import flush
+                        flush()
+                    except Exception:
+                        pass
                 final["_wallclock_s"] = time.time() - t0
+                final["_llm_source"] = st.session_state.llm_api_key or st.session_state.llm_base_url or st.session_state.llm_model
+                final["_traced"] = st.session_state.tracing_enabled
                 st.session_state.last_run = final
             except Exception as e:
                 st.error(f"Agent failed: {e}")
@@ -325,7 +448,7 @@ def main():
     final = st.session_state.last_run
     if final is None:
         st.markdown("---")
-        st.info("👆 Click **Run agent** to start. The pipeline runs BM25 + jina-v3 + RRF (top-100) and then the LLM agent reads the docs in batches of 10.")
+        st.info("👆 Click **Run agent** to start. The pipeline runs BM25 + jina-v3 + RRF (top-100) and then the LLM agent reads the docs in batches of 5.")
         return
 
     render_results(final, q)
@@ -348,6 +471,9 @@ def render_results(final: dict, q: dict):
     n_ai = sum(1 for m in final.get("messages", []) if m.__class__.__name__ == "AIMessage")
     bc[3].metric("🤖 LLM turns", n_ai)
     bc[4].metric("🎯 Hit", "✅ YES" if hit else "❌ NO")
+    llm_used = "UI values" if final.get("_llm_source") else "env vars"
+    st.caption(f"🤖 LLM: {llm_used} · {st.session_state.get('llm_protocol', 'openai')} · "
+               f"model = `{st.session_state.get('llm_model') or os.environ.get('MINIMAX_MODEL', '?')}`")
 
     # ---- retrieval stages ----
     with st.expander("⚙️ Retrieval stages (BM25, jina-v3, RRF)", expanded=False):

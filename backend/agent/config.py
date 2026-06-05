@@ -28,8 +28,8 @@ class AgentConfig:
     bm25_b: float = 0.75
 
     # Agent loop
-    batch_size: int = 10
-    max_iterations: int = 25               # 25 batches × 10 = 250 lookups; well past 100
+    batch_size: int = 5
+    max_iterations: int = 50               # 50 batches × 5 = 250 lookups; well past 100
     max_tokens: int = 1024
     temperature: float = 0.0
 

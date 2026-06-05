@@ -57,7 +57,7 @@ def make_get_next_batch(state_holder: dict) -> Callable:
     cfg = load_config()
 
     @tool
-    def get_next_batch(batch_size: int = 10) -> str:
+    def get_next_batch(batch_size: int = 5) -> str:
         """Fetch the next batch of documents (doc_id + content) from the refined list.
 
         Call this repeatedly until the answer is found or all documents are
@@ -65,7 +65,7 @@ def make_get_next_batch(state_holder: dict) -> Callable:
         advances the internal cursor.
 
         Args:
-            batch_size: How many documents to return (default 10).
+            batch_size: How many documents to return (default 5).
 
         Returns:
             JSON string with the batch, current index, and remaining count.
