@@ -7,8 +7,21 @@ Three sequential nodes mirror the production pipeline:
 
 The RRF ranking uses k0=60 (Cormack SIGIR 2009 default) which we found
 to be the best config in the experiments.
+
+BM25 on-disk cache
+------------------
+The BM25 index build is the dominant cold-start cost (~300 s for 511k docs).
+Because the index is a function of the **corpus** (not the query), it can be
+persisted to disk and reused across script invocations. The cache lives at
+``cfg.bm25_index_dir/<corpus_basename>__k1{K}_b{B>/`` and contains:
+  * the bm25s CSC arrays (mmap'd on load → no 600 MB RSS spike)
+  * ``doc_ids.json`` — 511,962 strings, the bm25s positions → doc_ids mapping
+  * ``corpus_fingerprint.txt`` — sha256 of sorted rel-paths + dir mtime, used
+    to invalidate the cache when the corpus changes
 """
 from __future__ import annotations
+import hashlib
+import json
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -32,11 +45,110 @@ _JINA_MODEL = None
 _LANCE_TABLE = None
 
 
+# Files that bm25.save() writes (so we can detect a complete cache dir).
+_BM25_CACHE_FILES = (
+    "data.csc.index.npy",
+    "indices.csc.index.npy",
+    "indptr.csc.index.npy",
+    "vocab.index.json",
+    "params.index.json",
+    "doc_ids.json",
+    "corpus_fingerprint.txt",
+)
+
+
+def _bm25_cache_dir(cfg) -> Path:
+    """Return the on-disk cache directory for the current config.
+
+    Keyed by corpus basename + k1 + b. Changing any of these creates a fresh
+    subdirectory, so parameter sweeps don't collide.
+    """
+    return (Path(cfg.bm25_index_dir)
+            / f"{Path(cfg.corpus_dir).name}__k1={cfg.bm25_k1}_b={cfg.bm25_b}")
+
+
+def _corpus_fingerprint(corpus_dir: str) -> str:
+    """Cheap fingerprint of the corpus: hash of sorted rel-paths + dir mtime.
+
+    Detects add/remove/rename and any change under corpus_dir. Does NOT hash
+    file contents (overkill at 511k docs / 3.3 GB).
+    """
+    root = Path(corpus_dir)
+    rels = sorted(str(p.relative_to(root).as_posix())
+                  for p in root.rglob("*.txt"))
+    try:
+        mtime = root.stat().st_mtime
+    except OSError:
+        mtime = 0
+    h = hashlib.sha256()
+    h.update(f"n={len(rels)}\nmtime={mtime:.3f}\n".encode())
+    for r in rels:
+        h.update(r.encode())
+        h.update(b"\n")
+    return h.hexdigest()
+
+
+def _try_load_bm25(cfg):
+    """Return (bm25, ids) from disk cache, or (None, None) on miss."""
+    cache_dir = _bm25_cache_dir(cfg)
+    if not cache_dir.is_dir():
+        return None, None
+    for fname in _BM25_CACHE_FILES:
+        if not (cache_dir / fname).is_file():
+            return None, None
+    fp_path = cache_dir / "corpus_fingerprint.txt"
+    if fp_path.read_text().strip() != _corpus_fingerprint(cfg.corpus_dir):
+        return None, None
+    import bm25s
+    t0 = time.time()
+    bm25 = bm25s.BM25.load(str(cache_dir), mmap=True, load_corpus=False)
+    ids = json.loads((cache_dir / "doc_ids.json").read_text())
+    print(f"[retrieval] BM25 index loaded from cache in {time.time()-t0:.1f}s "
+          f"({len(ids):,} docs, k1={cfg.bm25_k1}, b={cfg.bm25_b})",
+          flush=True)
+    return bm25, ids
+
+
+def _save_bm25(bm25, ids, cfg):
+    """Persist the BM25 index to disk. Best-effort — failures are logged
+    but never break the in-memory index."""
+    cache_dir = _bm25_cache_dir(cfg)
+    try:
+        t0 = time.time()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        # corpus=None skips the wasteful corpus.jsonl dump — we already have
+        # the corpus on disk and don't need the text in the cache.
+        bm25.save(str(cache_dir), corpus=None)
+        (cache_dir / "doc_ids.json").write_text(json.dumps(ids))
+        (cache_dir / "corpus_fingerprint.txt").write_text(
+            _corpus_fingerprint(cfg.corpus_dir)
+        )
+        print(f"[retrieval] BM25 index cached at {cache_dir} "
+              f"in {time.time()-t0:.1f}s", flush=True)
+    except Exception as e:
+        print(f"[retrieval] WARNING: BM25 cache save failed: {e!r}",
+              flush=True)
+
+
 def _get_bm25(cfg):
-    """Lazily build the BM25 index over the 511k corpus."""
+    """Lazily build (or load) the BM25 index over the corpus.
+
+    Order of operations:
+      1. In-process warm cache (module-level ``_BM25``) — fastest, no I/O.
+      2. On-disk cache — mmap'd load, ~5-10 s for 511k docs.
+      3. Cold build from corpus — ~300 s; saves the result for next time.
+    """
     global _BM25, _BM25_IDS
     if _BM25 is not None:
         return _BM25, _BM25_IDS
+
+    # Try on-disk cache first.
+    cached_bm, cached_ids = _try_load_bm25(cfg)
+    if cached_bm is not None:
+        _BM25, _BM25_IDS = cached_bm, cached_ids
+        return _BM25, _BM25_IDS
+
+    # Cold build.
     import bm25s
     t0 = time.time()
     texts: list[str] = []
@@ -45,11 +157,12 @@ def _get_bm25(cfg):
         ids.append(fp.relative_to(cfg.corpus_dir).as_posix())
         texts.append(fp.read_text(encoding="utf-8", errors="replace"))
     tokens = bm25s.tokenize(texts, stopwords="en", show_progress=False)
-    bm25 = bm25s.BM25(method="lucene", k1=1.5, b=0.75)
+    bm25 = bm25s.BM25(method="lucene", k1=cfg.bm25_k1, b=cfg.bm25_b)
     bm25.index(tokens, show_progress=False)
     print(f"[retrieval] BM25 index built: {len(ids):,} docs in {time.time()-t0:.1f}s",
           flush=True)
     _BM25, _BM25_IDS = bm25, ids
+    _save_bm25(bm25, ids, cfg)
     return bm25, ids
 
 

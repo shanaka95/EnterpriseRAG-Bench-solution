@@ -454,19 +454,33 @@ def render_results(final: dict, q: dict):
     st.markdown("## 🎯 Final answer")
     # final_answer is the `response` field of the submit_answer tool call.
     # The tool guarantees it's a clean string (validated JSON via Pydantic),
-    # never polluted with thinking traces.
-    ans = final.get("final_answer") or "(no answer submitted)"
-    if final.get("finished_via_tool"):
-        st.caption("✅ Extracted from `submit_answer` tool call (structured JSON)")
-    if hit:
+    # never polluted with thinking traces. An empty answer from the model
+    # is replaced with the explicit "Question cannot be answered..." text.
+    raw_ans = final.get("final_answer") or ""
+    if not raw_ans.strip():
+        ans = "Question cannot be answered with the available documents."
+        # Style this case distinctly so the user sees at a glance
+        # that the model could not find the answer.
         st.markdown(
-            f'<div class="final-card hit">'
-            f'<b style="font-size:1.1rem;">✅ HIT — gold doc was retrieved and cited</b>'
-            f'<hr style="border-color:#10b981;opacity:0.3;">{ans}</div>',
+            f'<div class="final-card" style="border-color:#94a3b8;'
+            f'background:linear-gradient(135deg,#f1f5f9 0%,#e2e8f0 100%);">'
+            f'<b style="font-size:1.05rem;color:#475569;">❓ No answer found</b>'
+            f'<hr style="border-color:#94a3b8;opacity:0.3;">'
+            f'<span style="color:#0f172a;">{ans}</span></div>',
             unsafe_allow_html=True)
     else:
-        st.markdown(
-            f'<div class="final-card">{ans}</div>', unsafe_allow_html=True)
+        ans = raw_ans
+        if final.get("finished_via_tool"):
+            st.caption("✅ Extracted from `submit_answer` tool call (structured JSON)")
+        if hit:
+            st.markdown(
+                f'<div class="final-card hit">'
+                f'<b style="font-size:1.1rem;">✅ HIT — gold doc was retrieved and cited</b>'
+                f'<hr style="border-color:#10b981;opacity:0.3;">{ans}</div>',
+                unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f'<div class="final-card">{ans}</div>', unsafe_allow_html=True)
 
     if supporting:
         st.markdown("### 📎 Supporting docs cited by the agent")

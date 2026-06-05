@@ -22,6 +22,11 @@ class AgentConfig:
     rrf_k0: int = 60
     rrf_top_k: int = 100
 
+    # BM25 (Lucene) — exposed so the on-disk cache key is deterministic.
+    # Changing k1 or b creates a fresh cache subdir; no manual invalidation.
+    bm25_k1: float = 1.5
+    bm25_b: float = 0.75
+
     # Agent loop
     batch_size: int = 10
     max_iterations: int = 25               # 25 batches × 10 = 250 lookups; well past 100
@@ -30,6 +35,7 @@ class AgentConfig:
 
     # Paths
     dense_index_dir: str = "/data/projects/rag/data/dense_index/db"
+    bm25_index_dir: str = "/data/projects/rag/data/bm25_index"
     corpus_dir: str = "/data/projects/rag/data/all_documents"
     questions_path: str = "/data/projects/rag/data/questions.jsonl"
 

@@ -120,7 +120,12 @@ def make_submit_answer(state_holder: dict) -> BaseTool:
     cfg = load_config()
 
     def _run(doc_id: str | None, response: str) -> str:
-        # The args have already been validated by Pydantic before this runs.
+        # Safety net: if the model submitted a blank/empty response,
+        # store the explicit "cannot be answered" message instead. The
+        # UI will show this as the final answer (not "(no answer)").
+        if not response or not response.strip():
+            response = "Question cannot be answered with the available documents."
+
         # Normalize doc_id: the schema says str or None, but the model
         # sometimes returns a comma-separated string for multiple docs.
         docs: list[str] = []
