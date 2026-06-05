@@ -1,0 +1,69 @@
+# Gitleaks config for EnterpriseRAG-Bench-solution.
+# Docs: https://github.com/gitleaks/gitleaks/blob/master/config/examples/simple.toml
+#
+# Usage:
+#   gitleaks detect --source . --redact --verbose
+#
+# Run as a pre-commit hook (see .pre-commit-config.yaml) or in CI on
+# every push + pull_request.
+
+title = "EnterpriseRAG-Bench-solution"
+
+# Inherit the bundled default rules (covers ~100 providers: AWS, GitHub,
+# Stripe, OpenAI, Anthropic, Slack, Google, generic high-entropy strings,
+# etc.). Our two custom rules below add coverage for the project's own
+# API-key formats.
+[extend]
+useDefault = true
+
+# --------------------------------------------------------------------------
+# Custom rules — match the project's known secret formats
+# --------------------------------------------------------------------------
+
+# Match a MiniMax/Anthropic-style key by prefix. Catches the previous
+# `sk-cp-J_Yx7...` leak and any future `sk-cp-...` or `sk-hX9...` key
+# regardless of what follows.
+[[rules]]
+id = "minimax-api-key"
+description = "MiniMax API key (sk-cp- or sk-hX9 prefix)"
+regex = '''\b(sk-cp-[A-Za-z0-9_-]{20,}|sk-hX9[A-Za-z0-9_-]{10,})\b'''
+entropy = 3.0
+keywords = ["sk-cp-", "sk-hX9"]
+
+# Match an `MINIMAX_API_KEY=...` assignment. The path-based allowlist
+# (below) exempts `.env.example` so the `sk-cp-...` placeholder there
+# doesn't get flagged.
+[[rules]]
+id = "minimax-env-var"
+description = "MINIMAX_API_KEY assignment with a real-looking value"
+regex = '''(?i)MINIMAX_(?:API_KEY|APIKEY)\s*[:=]\s*["']?[A-Za-z0-9_\-]{8,}["']?'''
+keywords = ["MINIMAX_API_KEY"]
+
+# --------------------------------------------------------------------------
+# Allowlist
+# --------------------------------------------------------------------------
+# Some files contain example values that are intentionally committed.
+# Allowlist them so the scan stays focused on real leaks.
+
+[allowlist]
+description = "Files safe to commit despite matching patterns"
+paths = [
+  # The .env.example template only has the placeholder `sk-cp-...`
+  '''\.env\.example$''',
+  # Our own gitleaks config — example key formats appear in the regex
+  '''\.gitleaks\.toml$''',
+  # Documentation may include example keys for illustration
+  '''(?:^|/)docs/.*\.md$''',
+  '''(?:^|/)README.*\.md$''',
+]
+
+# Allowlist specific known-rotated keys (regex match). The previous
+# `sk-cp-J_Yx7QwGKs6Fkut...` key is already revoked at the provider
+# per the user's instruction "the previous one is okay as it is
+# rotated now". We still scrubbed it from source in commit fb59103,
+# but it's in git history. Allowlisting it here stops the scanner
+# from re-flagging it on every run, while still catching any FUTURE
+# re-introduction of the same prefix.
+regexes = [
+  '''sk-cp-J_Yx7QwGKs6Fkut[A-Za-z0-9_-]+''',
+]

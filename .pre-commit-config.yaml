@@ -1,0 +1,20 @@
+# Pre-commit hooks for EnterpriseRAG-Bench-solution.
+#
+# Setup (one-time):
+#   pip install pre-commit        # or: apt install pre-commit
+#   pre-commit install            # installs the git hook
+#
+# Run manually (CI / before pushing):
+#   pre-commit run --all-files
+#
+# Skip a hook on a specific commit (use sparingly):
+#   git commit --no-verify -m "..."
+
+repos:
+  # Block leaks of API keys, tokens, passwords, and other secrets
+  # before they reach the remote. Uses the project's .gitleaks.toml
+  # config so the rule set matches what CI would enforce.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
