@@ -359,6 +359,80 @@ def _l2_normalize(v: np.ndarray) -> np.ndarray:
     return v / n
 
 
+def _find_nearest_sentence_end(char_pos: int,
+                                abs_sents: List[Tuple[int, int]],
+                                search_forward: bool) -> int | None:
+    """Find the closest sentence end to `char_pos` in the given direction.
+
+    Used by the character-wise fallback splitter to snap an arbitrary
+    midpoint to the nearest real sentence boundary (never mid-word).
+    Returns None if no sentence is found in that direction.
+    """
+    if not abs_sents:
+        return None
+    best: int | None = None
+    best_dist = float('inf')
+    for s, e in abs_sents:
+        # `e` is the sentence end (end_char, exclusive)
+        candidate = e
+        if search_forward:
+            if candidate < char_pos:
+                continue
+        else:
+            if candidate > char_pos:
+                continue
+        d = abs(candidate - char_pos)
+        if d < best_dist:
+            best_dist = d
+            best = candidate
+    return best
+
+
+def _split_at_sentence_boundaries(
+    start_char: int,
+    end_char: int,
+    colbert_vecs: np.ndarray,
+    char_offsets: list[tuple[int, int]],
+    sentences: List[Tuple[int, int]],
+    target_chunk_tokens: int,
+) -> List[Tuple[int, int, float]]:
+    """Split a char range into N pieces, each ending at a sentence boundary.
+
+    Used as a fallback when the semantic chunker returned a single chunk
+    that's too big. The previous version of this fallback split at fixed
+    char positions, which produced mid-word splits (e.g. "...if breaker
+    is OPEN but a" / "dmission controller still..."). This version always
+    snaps the split points to sentence boundaries.
+
+    Algorithm:
+      1. Decide how many pieces: ceil(n_tok / target_chunk_tokens).
+      2. For each piece boundary (i * piece_size), snap to the nearest
+         sentence end. If a forward snap goes past the doc, snap backward.
+      3. Emit the pieces as (start_char, end_char, 0.0) tuples.
+
+    Returns a list of 1+ pieces (the original range if no good split exists).
+    """
+    n_tok = _count_tokens_in_range(start_char, end_char, colbert_vecs, char_offsets)
+    n_pieces = max(2, (n_tok + target_chunk_tokens - 1) // target_chunk_tokens)
+    piece_chars = (end_char - start_char) // n_pieces
+
+    out: List[Tuple[int, int, float]] = []
+    prev_end = start_char
+    for i in range(1, n_pieces):
+        target = start_char + i * piece_chars
+        # Snap to nearest sentence end (forward, then backward)
+        snap = _find_nearest_sentence_end(target, sentences, search_forward=True)
+        if snap is None or snap <= prev_end or snap >= end_char:
+            snap = _find_nearest_sentence_end(target, sentences, search_forward=False)
+        if snap is None or snap <= prev_end or snap >= end_char:
+            continue
+        out.append((prev_end, snap, 0.0))
+        prev_end = snap
+    if prev_end < end_char:
+        out.append((prev_end, end_char, 0.0))
+    return out
+
+
 def semantic_chunk_sentences(
     text: str,
     sentences: List[Tuple[int, int]],
@@ -590,18 +664,22 @@ def recurse_chunk_semantic(
     # Convert chunk ranges back to absolute
     abs_chunks = [(s + start_char, e + start_char, b) for s, e, b in chunks]
 
-    # If the chunker returned a single chunk AND that chunk is too big,
-    # fall back to character-wise splitting. This handles docs that have
-    # no strong semantic breaks within them (rare, but happens for long
-    # monologues or single-topic technical docs).
-    if len(abs_chunks) == 1 and n_tok_in_range > 2 * target_chunk_tokens:
-        n_pieces = max(2, n_tok_in_range // target_chunk_tokens)
-        piece_chars = (end_char - start_char) // n_pieces
-        abs_chunks = []
-        for i in range(n_pieces):
-            cs = start_char + i * piece_chars
-            ce = start_char + (i + 1) * piece_chars if i < n_pieces - 1 else end_char
-            abs_chunks.append((cs, ce, 0.0))
+    # If the chunker returned a single chunk that's significantly too big,
+    # fall back to sentence-aware splitting. We use a 1.5x target threshold
+    # (not 2x) so we don't fight over a 591-token chunk that's just 15%
+    # over the hard cap; instead we let it be a leaf and the next level
+    # will try again. The fallback splits at SENTENCE BOUNDARIES near the
+    # target size, never mid-word. If we can't find a good split, the
+    # original single chunk is kept and becomes a leaf.
+    if len(abs_chunks) == 1 and n_tok_in_range > int(target_chunk_tokens * 1.5):
+        abs_chunks = _split_at_sentence_boundaries(
+            start_char=start_char,
+            end_char=end_char,
+            colbert_vecs=colbert_vecs,
+            char_offsets=char_offsets,
+            sentences=abs_sents,
+            target_chunk_tokens=target_chunk_tokens,
+        )
 
     if len(abs_chunks) == 1:
         node.is_leaf = True
