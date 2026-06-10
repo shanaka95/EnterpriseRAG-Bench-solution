@@ -51,6 +51,17 @@ FENCED_CODE_PATTERN = re.compile(r'```[^\n]*\n.*?```', re.DOTALL)
 # Indented code block (4+ spaces at line start, ≥2 lines)
 INDENTED_CODE_PATTERN = re.compile(r'(?:^(?:    |\t)[^\n]+\n?){2,}', re.MULTILINE)
 
+# Shell/Python comment lines: `# foo` (with optional leading whitespace).
+# ≥2 consecutive lines. These appear in confluence runbooks and
+# github-style markdown where the line `conftest publish --bucket=...`
+# is preceded by a `#` comment and would otherwise be split on the
+# `\n\n` paragraph break that follows the code block. Treating them as
+# atomic prevents mid-line splits like "...conftest publish --b" /
+# "ucket=conformance-bucket...".
+COMMENT_LINE_PATTERN = re.compile(
+    r'(?:^|\n)[ \t]*#[ \t][^\n]+(?:\n[ \t]*#[ \t][^\n]+)+', re.MULTILINE
+)
+
 # Bullet list item start
 BULLET_PATTERN = re.compile(r'(?:^|\n)[ \t]*[-*+•·][ \t]+')
 
@@ -160,23 +171,42 @@ def _strip_urls(text: str) -> str:
 
 def _mask_code_blocks(text: str) -> Tuple[str, List[Tuple[int, int, str]]]:
     """Replace code blocks with placeholder chars so the sentence splitter
-    doesn't touch them. Returns (masked_text, [(start, end, original), ...])."""
+    doesn't touch them. Returns (masked_text, [(start, end, original), ...]).
+
+    IMPORTANT: The masked text is the SAME LENGTH as the original. The
+    replacement string for each block is `\\n * original_count + ' ' *
+    (original_len - original_count)` so every char position in the original
+    maps 1:1 to a char position in the masked text. This is critical because
+    `_find_split_positions` and the downstream pipeline rely on the start/end
+    char positions being valid indices into the *original* text.
+
+    The previous version of this function used `\\n * original.count('\\n')`
+    which produced a SHORTER masked text (by the number of non-newline
+    chars), shifting all subsequent positions and causing sentences inside
+    code blocks to be split at every newline.
+    """
     blocks: List[Tuple[int, int, str]] = []
 
     def fenced_repl(m: re.Match) -> str:
         original = m.group(0)
+        n_newlines = original.count('\n')
+        n_spaces = len(original) - n_newlines
         blocks.append((m.start(), m.end(), original))
-        # Replace with newlines (so paragraph-break detection still works
-        # across the boundary) of equivalent length
-        return '\n' * original.count('\n')
+        # Same length as original; newlines preserve paragraph-break
+        # detection across the boundary, spaces preserve the char-position
+        # alignment for downstream position-based logic.
+        return ('\n' * n_newlines) + (' ' * n_spaces)
 
     def indented_repl(m: re.Match) -> str:
         original = m.group(0)
+        n_newlines = original.count('\n')
+        n_spaces = len(original) - n_newlines
         blocks.append((m.start(), m.end(), original))
-        return '\n'
+        return ('\n' * n_newlines) + (' ' * n_spaces)
 
     masked = FENCED_CODE_PATTERN.sub(fenced_repl, text)
     masked = INDENTED_CODE_PATTERN.sub(indented_repl, masked)
+    masked = COMMENT_LINE_PATTERN.sub(fenced_repl, masked)
     # Sort by start so we can recover the original positions
     blocks.sort()
     return masked, blocks
@@ -270,22 +300,49 @@ def _merge_short(sentences: List[Tuple[int, int, str, str]], min_chars: int) -> 
 
 
 def _hard_split_long(sentences: List[Tuple[int, int, str, str]], max_chars: int) -> List[Tuple[int, int, str, str]]:
-    """If any sentence exceeds max_chars, force-split it on the next \\n."""
+    """If any sentence exceeds max_chars, force-split it on the next sentence
+    boundary we can find.
+
+    Priority for the split point (in order):
+      1. The next '\\n' after `cursor` (within a 200-char lookahead). This
+         preserves bullet/note structure.
+      2. The last whitespace (space, tab) before `cursor + max_chars`. This
+         avoids splitting mid-word when there's no newline available.
+      3. The cap position itself, as a last resort. This is mid-word and
+         bad, but only happens when the sentence has zero whitespace in
+         `max_chars` chars (extremely rare — code blobs).
+
+    The previous version fell through to (3) too often, producing mid-word
+    splits like "...reserved warm pool and adjusti" / "ng prewarm
+    concurrency." when a long sentence had no internal newlines.
+    """
     out: List[Tuple[int, int, str, str]] = []
     for s, e, txt, kind in sentences:
         if len(txt) <= max_chars:
             out.append((s, e, txt, kind))
             continue
-        # Hard-split: find the next \n after every max_chars
+        # Hard-split: prefer \n, then whitespace, then char cap
         cursor = 0
         abs_cursor = s
         while cursor < len(txt):
             end_cursor = min(cursor + max_chars, len(txt))
             if end_cursor < len(txt):
-                # Find next newline
-                nl = txt.find('\n', cursor, end_cursor + 200)  # look ahead a bit
+                # 1. Try next newline
+                nl = txt.find('\n', cursor, end_cursor + 200)
                 if nl > cursor:
                     end_cursor = nl + 1
+                else:
+                    # 2. Last whitespace before the cap, within the same window
+                    window_end = min(end_cursor + 200, len(txt))
+                    ws = -1
+                    for j in range(end_cursor - 1, cursor, -1):
+                        if txt[j] in ' \t':
+                            ws = j
+                            break
+                    if ws > cursor:
+                        end_cursor = ws + 1
+                    # 3. Fallback: use the cap (may be mid-word). Acceptable
+                    # for the rare all-one-word case.
             out.append((abs_cursor + cursor, abs_cursor + end_cursor, txt[cursor:end_cursor], kind))
             cursor = end_cursor
     return out
