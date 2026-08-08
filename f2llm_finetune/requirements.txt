@@ -1,0 +1,7 @@
+accelerate
+datasets
+deepspeed
+flash-attn
+torch
+transformers
+tensorboard
